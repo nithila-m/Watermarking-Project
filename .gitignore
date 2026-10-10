@@ -2,11 +2,11 @@
 __pycache__/
 *.pyc
 
-# Heavy image datasets (Do NOT upload to GitHub)
-raw/
-data/clean/train/
-data/clean/val/
-data/clean/test/
+# Dataset images (root or inside Member B)
+**/data/clean/train/
+**/data/clean/val/
+**/data/clean/test/
+**/raw/
 
-# Generated sample attack images
-results/*.png
+# Generated output PNGs
+**/results/*.png
