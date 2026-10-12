@@ -46,7 +46,6 @@ def prepare(img):
     return cv2.resize(img, (512, 512), interpolation=cv2.INTER_AREA)
 
 
-# ---------------- sidebar ----------------
 with st.sidebar:
     st.header("1. Image")
     up = st.file_uploader("Upload", type=["png", "jpg", "jpeg", "bmp", "webp"])
@@ -80,7 +79,6 @@ else:
     st.stop()
 img = prepare(img)
 
-# ---------------- embed ----------------
 msg_bits = ecc.text_to_bits(message)
 payload = ecc.encode(msg_bits)
 kw = {"alpha": alpha} if mode != "uniform" else {}
@@ -88,7 +86,6 @@ base = make_map(img, mode, model, **kw)
 wm, s_map, p = embed_at_psnr(img, payload, base, int(key), target)
 _, skipped = embed(img, payload, s_map, int(key), return_skipped=True)
 
-# ---------------- attack + verify ----------------
 att = wm if kind == "none" else apply_attack(wm, kind, sev, int(seed))
 got = extract(att, PAYLOAD_BITS, int(key))
 dec, ok = ecc.decode(got)

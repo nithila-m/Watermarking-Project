@@ -13,7 +13,7 @@ python -m pip install --upgrade pip
 pip install -r requirements.txt
 pip install -e .
 python -c "import cv2; print(cv2.__version__, hasattr(cv2, 'saliency'))"   # must print True
-python -m pytest                                                            # 37 tests, ~5 s
+python -m pytest
 ```
 If `cv2.saliency` is missing, plain `opencv-python` is installed next to the contrib build:
 `pip uninstall -y opencv-python opencv-contrib-python` then `pip install opencv-contrib-python`.
@@ -29,7 +29,71 @@ If `cv2.saliency` is missing, plain `opencv-python` is installed next to the con
 | 4 predictor | `python scripts\p4_train_predictor.py` | `models\survival.joblib`, `results\p4_*` |
 | 5 ablation | `python scripts\p5_ablation.py --alpha 1.0 --beta 0.0` | `results\p5_*.csv/png` (incl. per-texture table) |
 | 6 benchmark | `python scripts\p6_benchmark.py` (`--mock` to test the harness) | `results\p6_*.csv` |
-| any time | `streamlit run app\streamlit_app.py` | interactive test bench |
+| 7 partial recovery | `python scripts\p7_partial_recovery.py` | deterministic redundancy + ECC recovery report |
+| 8 image recovery | `python scripts\p8_image_recovery.py` | real-image attack recovery report and `results\p8_image_recovery.csv` |
+| 9 RS symbol analysis | `python -m scripts.p9_symbol_error_analysis` | deterministic multi-image byte-symbol analysis and `results\p9_symbol_error_analysis.csv` |
+| 10 erasure study | `python -m scripts.p10_erasure_recovery` | confidence-aware RS erasure experiment and `results\p10_erasure_recovery.csv` |
+| 11 robust voting | `python -m scripts.p11_robust_voting` | experimental margin-voting comparison and `results\p11_robust_voting.csv` |
+| 13 final evaluation | `python -m scripts.final_member_c_evaluation` | consolidated CSVs and report tables/findings in `results\` |
+| final demo | `streamlit run app\demo_app.py` | interactive Member C embed/attack/recovery demo |
+| demo CLI | `python scripts\demo.py --image data\clean\test\grass.png --text TEST` | prints embed/extract/ECC result |
+| adaptive bench | `streamlit run app\streamlit_app.py` | existing adaptive watermark test bench |
+| final evaluation | `python -m scripts.final_member_c_evaluation` | consolidated Member C CSVs and report-ready tables/findings |
+
+P10 is an experimental confidence-aware erasure study based on existing extraction
+vote totals; it does not change production decoding. Its oracle-erasure results use
+known original symbols for analysis only and are **not part of the production system**.
+
+P11 is an experimental comparison of aggregation rules over the same extracted
+block margins; production extraction is unchanged. Alternatives are: median
+margin (median signed margin, positive means 1); trimmed mean (drop one minimum
+and maximum margin when at least three observations are available, then threshold
+the mean at zero); sign majority (sum margin signs, ties decode to 0); and
+confidence-weighted sign (sum `sign(margin) * abs(margin)`, positive means 1,
+ties decode to 0). The baseline remains the existing median-scaled tanh soft vote.
+
+## Final Demo
+
+The final user-facing demo uses the **production Member C pipeline**: text-to-bits,
+existing Reed-Solomon encoding, a uniform strength map, target-PSNR embedding,
+optional existing image attack, production extraction, and existing Reed-Solomon
+decoding. It does not use P10 erasures or P11 experimental voting.
+
+Launch the upload/sample-image interface from the repository root:
+
+```powershell
+streamlit run app\demo_app.py
+```
+
+Choose an uploaded image or a clean test image, enter a watermark such as `TEST`,
+select an optional attack and severity, then click **Embed & Test**. Inputs are
+center-cropped and resized to 512x512 for the watermark pipeline. The UI displays
+the original, watermarked, and attacked images; recovered text; exact recovery;
+ECC status; bit accuracy; BER; PSNR; and SSIM.
+
+Run the CLI from the repository root:
+
+```powershell
+python scripts\demo.py --image data\clean\test\grass.png --text TEST --attack blur --severity moderate
+```
+
+Use `--attack none` for a clean round trip. Watermarks are limited to four UTF-8
+bytes by the existing 32-bit message payload. Bit accuracy and BER compare the
+extracted 64-bit coded payload with the encoded payload; PSNR and SSIM compare
+the original input with the watermarked image. These metrics describe a single run
+and do not imply robustness beyond the measured P8/P9/P10/P11 experiments.
+
+The final evaluation package reuses the saved P2 and P8-P11 CSV files. It generates
+only the missing lightweight P7 synthetic-recovery rows and P12 fixed-seed demo
+verification rows. Outputs are `results\final_member_c_results.csv`,
+`results\final_member_c_summary.csv`, `results\final_member_c_tables.md`, and
+`results\final_member_c_findings.md`.
+
+P13 consolidates the existing Member C results into `results\final_member_c_results.csv`,
+`results\final_member_c_summary.csv`, `results\final_member_c_tables.md`, and
+`results\final_member_c_findings.md`. It reuses saved P2 and P8-P11 result files;
+only missing lightweight P7 synthetic rows and P12 demo-verification rows are
+generated when building the package.
 
 Real Stable Diffusion edits: `p2 --export-for-b` writes the watermarked training images to
 `results\for_b\`; edit them on Colab and put the results, with the same file names, in
@@ -61,10 +125,11 @@ watermarking-project/
 ├── scripts/
 │   ├── prepare_dataset.py    # COCO (aspect filter, 70/10/20 split) or scikit-image dev set
 │   ├── analyze_textures.py   # writes data/clean/test_metadata.csv
-│   ├── p1_selftest.py … p6_benchmark.py
+│   ├── p1_selftest.py … p6_benchmark.py, p7_partial_recovery.py … p11_robust_voting.py, demo.py
 ├── app/
-│   └── streamlit_app.py      # embed -> edit -> verify test bench
-├── tests/                    # pytest: metrics, every attack, end-to-end round trip, benchmark harness
+│   ├── demo_app.py           # final Member C upload/sample -> embed -> attack -> recovery demo
+│   └── streamlit_app.py      # existing adaptive watermark test bench
+├── tests/                    # pytest: metrics, attacks, end-to-end, recovery experiments, final demo
 │   ├── conftest.py
 │   ├── test_metrics.py
 │   ├── test_attacks.py
