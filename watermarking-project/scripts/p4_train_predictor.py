@@ -68,7 +68,7 @@ def main():
     OUT.mkdir(exist_ok=True)
 
     # ---- 1-2. train ----
-    df = pd.read_csv(args.data)
+    df = pd.read_csv(args.data, dtype={"image_id": str})   # keep leading zeros: "000012", not 12
     n_ext = int((df.groupby("image_id").n_external.first() > 0).sum()) if "n_external" in df else 0
     print(f"training on {len(df)} blocks from {df.image_id.nunique()} images ({n_ext} with real AI edits)")
     model, report = train(df)
