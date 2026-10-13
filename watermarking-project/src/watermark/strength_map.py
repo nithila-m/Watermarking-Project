@@ -35,13 +35,21 @@ def heuristic_map(img, feats=None, alpha=1.0):
     return normalize((f["std"].values + 2.0) ** alpha)
 
 
-def learned_map(img, model, feats=None, alpha=1.0, beta=0.0):
-    """s_i ~ predicted_sigma_i ** alpha * predicted_keep_i ** beta."""
+def learned_map(img, model, feats=None, alpha=1.0, beta=0.0, shrink=1.0, s_min=S_MIN):
+    """s_i ~ predicted_sigma_i ** alpha * predicted_keep_i ** beta.
+
+    Two optional safety knobs (Phase 6 fixes). The defaults reproduce the original map exactly.
+      shrink < 1 : pull the map toward uniform, rel = (1 - shrink) + shrink * rel
+      s_min      : floor for any block's relative strength (default 0.25 of the mean)
+    """
     f = block_features(img) if feats is None else feats
     rel = model.predict_sigma(f) ** alpha
     if beta:
         rel = rel * model.predict_keep(f) ** beta
-    return normalize(rel)
+    if shrink != 1.0:
+        rel = rel / rel.mean()
+        rel = (1.0 - shrink) + shrink * rel
+    return normalize(rel, s_min=s_min)
 
 
 def strength_map(img, mode="uniform", model=None, **kw):

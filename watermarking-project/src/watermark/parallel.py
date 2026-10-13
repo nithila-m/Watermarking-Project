@@ -16,9 +16,25 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from tqdm import tqdm
 
 
+MAX_DEFAULT_WORKERS = 4   # each worker loads its own copy of the model (~100-200 MB)
+
+
 def default_workers():
-    """All cores but one, so the laptop stays usable."""
-    return max(1, (os.cpu_count() or 2) - 1)
+    """All cores but one, capped at 4 so a laptop does not run out of memory."""
+    return max(1, min(MAX_DEFAULT_WORKERS, (os.cpu_count() or 2) - 1))
+
+
+def check_failures(failed, total, what="images", limit=0.1):
+    """Stop the script if more than `limit` of the jobs failed, with the usual fix.
+
+    Results computed from a few surviving images look normal but mean nothing,
+    so it is better to stop than to print them.
+    """
+    if total and len(failed) / total > limit:
+        mem = any("Memory" in str(e) for _, e in failed)
+        hint = ("Out of memory: re-run with fewer worker processes, e.g. --workers 2 "
+                "(close other programs too)." if mem else "See the first error above.")
+        raise SystemExit(f"\n{len(failed)} of {total} {what} failed, too many to trust the results. {hint}")
 
 
 def _init_worker():
