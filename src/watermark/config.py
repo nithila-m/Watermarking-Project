@@ -19,7 +19,7 @@ PAYLOAD_BITS = 64       # bits written into the image (message + ECC parity)
 MESSAGE_BITS = 32       # message bits when ECC is on (4 bytes)
 ECC_PARITY_BYTES = 4    # Reed-Solomon parity bytes (corrects up to 2 byte errors)
 
-TARGET_PSNR = 42.0      # every configuration is calibrated to this PSNR (fair comparison)
+TARGET_PSNR = 45.0      # every configuration is calibrated to this PSNR (fair comparison)
                         # 40 dB made the uniform baseline near-perfect on smooth images,
                         # leaving no room to show what adaptivity adds
 DEFAULT_STRENGTH = 12.0 # starting uniform strength before PSNR calibration
