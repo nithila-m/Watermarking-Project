@@ -4,7 +4,8 @@ r"""Phase 5: the ablation on the held-out TEST split, with significance tests.
     python scripts\p5_ablation.py --n 0               # every test image (slow)
     python scripts\p5_ablation.py --fresh             # ignore earlier partial results
 
-alpha/beta come from results/p4_choice.json (override with --alpha/--beta).
+Map settings (alpha, beta, shrink, s_min) come from results/p4_choice.json, written by
+Phase 4 and possibly updated by Phase 6 (override alpha/beta with --alpha/--beta).
 Configs: uniform, uniform+ecc, heuristic+ecc, adaptive, adaptive+ecc, all at the same PSNR.
 
 Resumable: rows are appended to results/p5_raw.csv as each image finishes, so if
@@ -28,9 +29,10 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 from watermark import dataset
+from watermark.choice import file_md5, map_params
 from watermark.config import TARGET_PSNR, TEXTURE_CSV
 from watermark.jobs import eval_job
-from watermark.parallel import default_workers, pmap
+from watermark.parallel import check_failures, default_workers, pmap
 from watermark.sampling import stratified
 from watermark.stats import compare
 from watermark.textures import load_texture_table
@@ -41,14 +43,6 @@ RUN = OUT / "p5_run.json"
 ORDER = ["uniform", "uniform+ecc", "heuristic+ecc", "adaptive", "adaptive+ecc"]
 PAIRS = [("adaptive+ecc", "uniform+ecc"), ("heuristic+ecc", "uniform+ecc"),
          ("adaptive", "uniform"), ("uniform+ecc", "uniform")]
-
-
-def load_choice(args):
-    p = OUT / "p4_choice.json"
-    choice = json.loads(p.read_text()) if p.exists() else {}
-    alpha = args.alpha if args.alpha is not None else choice.get("alpha", 1.0)
-    beta = args.beta if args.beta is not None else choice.get("beta", 0.0)
-    return float(alpha), float(beta)
 
 
 def plots(att):
@@ -86,11 +80,11 @@ def main():
     if not Path(args.model).exists():
         raise SystemExit(f"{args.model} not found. Run scripts\\p4_train_predictor.py first.")
 
-    alpha, beta = load_choice(args)
+    params = map_params(alpha=args.alpha, beta=args.beta)
     tex = load_texture_table(TEXTURE_CSV)["texture_category"] if TEXTURE_CSV.exists() else pd.Series(dtype=str)
     names = stratified(dataset.require("test"), args.n, tex.to_dict(), seed=0)
-    run = {"alpha": alpha, "beta": beta, "target_psnr": TARGET_PSNR, "model": args.model,
-           "configs": ORDER}
+    run = {**params, "target_psnr": TARGET_PSNR, "model": args.model,
+           "model_md5": file_md5(args.model), "configs": ORDER}
 
     # ---- resume ----
     done = set()
@@ -110,14 +104,21 @@ def main():
     RUN.write_text(json.dumps(run, indent=1))
 
     todo = [n for n in names if n not in done]
-    print(f"{len(names)} test images (alpha={alpha}, beta={beta}): {len(names) - len(todo)} already done, "
+    print(f"{len(names)} test images, map {params}: {len(names) - len(todo)} already done, "
           f"{len(todo)} to run on {args.workers} workers")
-    jobs = [("test", n, ORDER, args.model, {"learned": {"alpha": alpha, "beta": beta}}) for n in todo]
+    jobs = [("test", n, ORDER, args.model, {"learned": params}) for n in todo]
+    failed = []
     for (_, n, *_), rows, err in pmap(eval_job, jobs, args.workers, desc="test images"):
         if err:
-            print(f"\n! {n} failed:\n{err}")
+            failed.append((n, err))
+            if len(failed) <= 2:
+                print(f"\n! {n} failed:\n{err}")
             continue
         pd.DataFrame(rows).to_csv(RAW, mode="a", header=not RAW.exists(), index=False)
+    if failed:
+        print(f"\n{len(failed)} image(s) failed and were NOT saved. Finished images are kept: re-run the "
+              f"same command (with --workers 2 if it was a memory error) to complete them.")
+    check_failures(failed, len(todo), "test images")
 
     # ---- tables ----
     df = pd.read_csv(RAW, dtype={"image": str})
