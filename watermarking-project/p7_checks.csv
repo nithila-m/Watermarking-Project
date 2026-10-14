@@ -1,0 +1,12 @@
+check,status,detail
+settings: map,PASS,"p5 ran with {'alpha': 0.5, 'beta': 0.0, 'shrink': 1.0, 's_min': 0.25}, current choice {'alpha': 0.5, 'beta': 0.0, 'shrink': 1.0, 's_min': 0.25}"
+settings: model,PASS,"model used by p5 097030026d4e, model on disk 097030026d4e"
+complete,PASS,300 images x 5 configs x 26 attack rows; 0 duplicates; rows per image [130]
+psnr,PASS,"mean PSNR per config {'uniform': 42.01, 'uniform+ecc': 42.01, 'heuristic+ecc': 42.02, 'adaptive': 42.01, 'adaptive+ecc': 42.01}; 0 image/config pairs below 41.5 dB"
+clean,PASS,"no-edit success for ECC configs {'uniform+ecc': 1.0, 'heuristic+ecc': 1.0, 'adaptive+ecc': 1.0}"
+tables: severity,PASS,max difference 5e-05 between p5_by_severity.csv and p5_raw.csv
+tables: texture,PASS,max difference 0 between p5_by_texture.csv and p5_raw.csv
+tables: stats,PASS,max difference 3.3e-06 between p5_stats.csv and a fresh bootstrap
+texture,PASS,"test images per texture {'Complex': 100, 'Smooth': 100, 'Medium': 100}"
+phase4,PASS,map chosen on 60 VAL images: learned_a0.5_b0
+real edits,WARN,results/p5x_raw.csv not found (Phase 5b not run yet)
