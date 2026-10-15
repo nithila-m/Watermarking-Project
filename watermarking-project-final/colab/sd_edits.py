@@ -31,6 +31,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageFilter
 
+# Supported generative AI distortion conditions and corresponding parameters
 EDITS = {
     "inpaint_light":    {"kind": "inpaint", "frac": 0.10},
     "inpaint_moderate": {"kind": "inpaint", "frac": 0.20},
@@ -48,19 +49,41 @@ INPAINT_MODELS = [
     "diffusers/stable-diffusion-xl-1.0-inpainting-0.1",
 ]
 
+# Replacement prompts for localized generative inpainting
 PROMPTS = ["a potted plant", "a wooden bench", "a parked bicycle", "a small dog", "a stack of books",
            "a street lamp", "a flower bed", "a red umbrella", "an empty background", "a cardboard box",
            "a coffee cup on a table", "green grass"]
+# High-fidelity prompt for whole-image diffusion regeneration attacks
 REGEN_PROMPT = "a high quality photograph"
 
 
 def seed_for(split, name, edit):
-    """Same seed for every config copy of an image, different per image and edit."""
+    """Same seed for every config copy of an image, different per image and edit.
+
+    Guarantees deterministic masking and generation across both uniform and adaptive runs.
+
+    Args:
+        split (str): Dataset partition ('train' or 'test').
+        name (str): Base image identifier.
+        edit (str): Edit condition identifier.
+
+    Returns:
+        int: 32-bit unsigned CRC32 integer seed.
+    """
     return zlib.crc32(f"{split}|{name}|{edit}".encode())
 
 
 def make_mask(size, frac, rng):
-    """1-3 rectangles until about `frac` of the image is covered. 255 = repaint."""
+    """1-3 rectangles until about `frac` of the image is covered. 255 = repaint.
+
+    Args:
+        size (tuple[int, int]): Image dimensions as (width, height).
+        frac (float): Target fraction of image area to mask.
+        rng (np.random.Generator): Deterministic pseudo-random number generator.
+
+    Returns:
+        np.ndarray: Single-channel uint8 binary mask (0 = keep, 255 = repaint).
+    """
     w, h = size
     mask = np.zeros((h, w), np.uint8)
     while mask.mean() / 255 < frac:
@@ -72,9 +95,23 @@ def make_mask(size, frac, rng):
 
 
 def load_pipeline(model_ids, device, dtype):
+    """Iteratively attempts to instantiate a Stable Diffusion inpainting pipeline.
+
+    Args:
+        model_ids (list[str]): Candidate Hugging Face repository IDs.
+        device (str): Computation device ('cuda' or 'cpu').
+        dtype (torch.dtype): Model weight precision (e.g., torch.float16).
+
+    Returns:
+        AutoPipelineForInpainting: Initialized diffusion pipeline loaded onto device.
+
+    Raises:
+        SystemExit: If none of the candidate models could be downloaded or loaded.
+    """
     from diffusers import AutoPipelineForInpainting
     errors = []
     for mid in model_ids:
+        # Try both without safety checker (to prevent false black frames) and standard config
         for kw in ({"safety_checker": None, "requires_safety_checker": False}, {}):
             try:
                 pipe = AutoPipelineForInpainting.from_pretrained(mid, torch_dtype=dtype, **kw)
@@ -86,10 +123,25 @@ def load_pipeline(model_ids, device, dtype):
 
 
 def _to_size(img, size):
+    """Ensures image conforms strictly to expected spatial dimensions."""
     return img if img.size == size else img.resize(size, Image.Resampling.LANCZOS)
 
 
 def inpaint(pipe, img, mask, prompt, gen, steps, guidance):
+    """Executes Stable Diffusion inpainting and composites the result into the host image.
+
+    Args:
+        pipe: Diffusers inpainting pipeline.
+        img (PIL.Image.Image): Input image.
+        mask (np.ndarray): Binary mask indicating region to regenerate.
+        prompt (str): Text prompt guiding inpainting synthesis.
+        gen (torch.Generator): Device-specific torch random generator.
+        steps (int): Total diffusion denoising steps.
+        guidance (float): Classifier-free guidance scale.
+
+    Returns:
+        PIL.Image.Image: Composited image with soft Gaussian-blurred boundary seams.
+    """
     out = pipe(prompt=prompt, image=img, mask_image=Image.fromarray(mask), height=img.height,
                width=img.width, num_inference_steps=steps, guidance_scale=guidance,
                generator=gen).images[0]
@@ -100,6 +152,18 @@ def inpaint(pipe, img, mask, prompt, gen, steps, guidance):
 
 
 def regen(pipe, img, strength, gen, steps):
+    """Applies whole-image diffusion regeneration at a specified noise strength.
+
+    Args:
+        pipe: Diffusers inpainting pipeline.
+        img (PIL.Image.Image): Input image.
+        strength (float): Fraction of diffusion trajectory to noise and redraw (0.0 to 1.0).
+        gen (torch.Generator): Device-specific torch random generator.
+        steps (int): Total baseline inference steps.
+
+    Returns:
+        PIL.Image.Image: Regenerated image.
+    """
     # the pipeline only runs int(steps * strength) denoising steps; make sure that is >= 3
     steps = max(steps, int(np.ceil(3 / strength)))
     full = Image.new("L", img.size, 255)
@@ -110,17 +174,39 @@ def regen(pipe, img, strength, gen, steps):
 
 
 def vae_roundtrip(vae, img, device):
+    """Encodes and decodes an image purely through the latent VAE autoencoder.
+
+    Isolates the spatial loss and latent quantization artifacts common to all latent diffusion edits.
+
+    Args:
+        vae: AutoencoderKL model instance.
+        img (PIL.Image.Image): Input RGB image.
+        device (str): Computation device ('cuda' or 'cpu').
+
+    Returns:
+        PIL.Image.Image: Reconstructed RGB image after VAE latent bottlenecking.
+    """
     import torch
+    # Normalize RGB [0, 255] to tensor [-1.0, 1.0] in BCHW layout
     x = torch.from_numpy(np.asarray(img, dtype=np.float32) / 127.5 - 1).permute(2, 0, 1)[None]
     with torch.no_grad():
         x = x.to(device=device, dtype=vae.dtype)
         y = vae.decode(vae.encode(x).latent_dist.mode()).sample
+    # Clamp and rescale back to uint8 [0, 255]
     y = ((y[0].float().clamp(-1, 1) + 1) * 127.5).round().byte().permute(1, 2, 0).cpu().numpy()
     return Image.fromarray(y)
 
 
 def find_images(src, only):
-    """[(split, rel_path)] for src/train/*.png and src/test/<config>/*.png."""
+    """[(split, rel_path)] for src/train/*.png and src/test/<config>/*.png.
+
+    Args:
+        src (Path): Root folder containing exported images.
+        only (str or None): Optional filter constraint ('train', 'test', or None for all).
+
+    Returns:
+        list[tuple[str, Path]]: Discovered dataset split tags and relative paths.
+    """
     items = []
     if only in (None, "train"):
         items += [("train", p.relative_to(src)) for p in sorted((src / "train").glob("*.png"))]
@@ -130,9 +216,10 @@ def find_images(src, only):
 
 
 def main(argv=None):
+    """CLI execution entry point for GPU-accelerated Stable Diffusion edits on Colab."""
     import torch
 
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser(description="Generate realistic Stable Diffusion AI edits on GPU.")
     ap.add_argument("--src", required=True, help="the colab_export folder (has train/ and/or test/)")
     ap.add_argument("--dst", required=True, help="where edited images go")
     ap.add_argument("--edits", nargs="+", default=list(EDITS), choices=list(EDITS))
@@ -150,10 +237,13 @@ def main(argv=None):
     if not items:
         raise SystemExit(f"no PNGs under {src}/train or {src}/test/<config>/")
 
+    # Detect hardware acceleration
     device = "cuda" if torch.cuda.is_available() else "cpu"
     dtype = torch.float16 if device == "cuda" else torch.float32
     if device == "cpu":
         print("WARNING: no GPU. This will be extremely slow. Colab: Runtime > Change runtime type > T4 GPU")
+
+    # Load diffusion pipeline
     pipe = load_pipeline([args.model] if args.model else INPAINT_MODELS, device, dtype)
     pipe.set_progress_bar_config(disable=True)
     vae32 = None
@@ -161,23 +251,31 @@ def main(argv=None):
         import copy
         vae32 = copy.deepcopy(pipe.vae).to(device=device, dtype=torch.float32)
 
+    # Filter out files that were already processed in earlier runs (enables resume on disconnect)
     todo = [(s, rel, e) for s, rel in items for e in args.edits if not (dst / e / rel).exists()]
     print(f"{len(items)} images x {len(args.edits)} edits: {len(todo)} files to make on {device}")
     t0, done = time.time(), 0
     cache = {}
+
+    # Process all image-edit combinations
     for split, rel, edit in todo:
         name = rel.stem
+        # In-memory image caching to avoid redundant disk reads across multiple edits of the same image
         if rel not in cache:
             cache = {rel: Image.open(src / rel).convert("RGB")}
         img = cache[rel]
         cfg = EDITS[edit]
         seed = seed_for(split, name, edit)
         gen = torch.Generator(device=device).manual_seed(seed)
+
+        # Route to specific generative attack routine
         if cfg["kind"] == "inpaint":
             rng = np.random.default_rng(seed)
             mask = make_mask(img.size, cfg["frac"], rng)
             prompt = PROMPTS[int(rng.integers(len(PROMPTS)))]
             out = inpaint(pipe, img, mask, prompt, gen, args.steps, args.guidance)
+
+            # Persist visual inpainting mask for experimental logging and report assets
             mpath = dst / "masks" / split / f"{name}_{edit}.png"
             if not mpath.exists():
                 mpath.parent.mkdir(parents=True, exist_ok=True)
@@ -186,14 +284,19 @@ def main(argv=None):
             out = regen(pipe, img, cfg["strength"], gen, args.steps)
         else:
             out = vae_roundtrip(vae32, img, device)
+
+        # Save output image
         path = dst / edit / rel
         path.parent.mkdir(parents=True, exist_ok=True)
         out.save(path)
         done += 1
+
+        # Periodic progress and ETA logging
         if done % 25 == 0 or done == len(todo):
             rate = (time.time() - t0) / done
             print(f"  {done}/{len(todo)}  {rate:.1f} s/file  ~{rate * (len(todo) - done) / 60:.0f} min left",
                   flush=True)
+
     print(f"done. Download {dst} and put its contents in data/external/ of the repo.")
 
 
