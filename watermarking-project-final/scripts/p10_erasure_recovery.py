@@ -13,14 +13,27 @@ from scripts.p9_symbol_error_analysis import N_IMAGES, select_test_images
 from watermark import ecc
 from watermark.config import ECC_PARITY_BYTES, MESSAGE_BITS, PAYLOAD_BITS
 
+# Sweep thresholds used to convert continuous extraction confidence into erasure flags
 ERASURE_THRESHOLDS = (0.0, 0.25, 0.50, 0.75, 1.0)
 OUTPUT_CSV = Path("results") / "p10_erasure_recovery.csv"
+# Total Reed-Solomon symbol count (8 bytes for a 64-bit codeword)
 RS_SYMBOLS = PAYLOAD_BITS // 8
+# Reed-Solomon codec initialized with 4 parity symbols (corrects up to 2 errors or 4 erasures)
 _rs = RSCodec(ECC_PARITY_BYTES)
 
 
 def normalize_bit_confidence(vote_totals):
-    """Scale absolute per-bit vote totals to [0, 1] within one extraction."""
+    """Scale absolute per-bit vote totals to [0, 1] within one extraction.
+
+    Args:
+        vote_totals (array-like): Raw soft-vote accumulation values per bit.
+
+    Returns:
+        np.ndarray: Normalized confidence array bounded by [0.0, 1.0].
+
+    Raises:
+        ValueError: If vote_totals length differs from PAYLOAD_BITS.
+    """
     magnitudes = np.abs(np.asarray(vote_totals, dtype=np.float64).ravel())
     if len(magnitudes) != PAYLOAD_BITS:
         raise ValueError(f"expected {PAYLOAD_BITS} vote totals, got {len(magnitudes)}")
@@ -31,15 +44,40 @@ def normalize_bit_confidence(vote_totals):
 
 
 def byte_confidence(bit_confidence):
-    """Use the least confident bit as the confidence of each packed RS byte."""
+    """Use the least confident bit as the confidence of each packed RS byte.
+
+    Because any single bit error corrupts the entire 8-bit Reed-Solomon symbol,
+    the byte-level confidence is bottlenecked by the minimum bit confidence.
+
+    Args:
+        bit_confidence (array-like): Normalized confidence values per bit.
+
+    Returns:
+        np.ndarray: Confidence scores for each of the 8 Reed-Solomon byte symbols.
+
+    Raises:
+        ValueError: If bit_confidence length differs from PAYLOAD_BITS.
+    """
     confidence = np.asarray(bit_confidence, dtype=np.float64).ravel()
     if len(confidence) != PAYLOAD_BITS:
         raise ValueError(f"expected {PAYLOAD_BITS} bit confidences, got {len(confidence)}")
+    # Reshape 64 bits into 8 groups of 8 bits and take the minimum across each byte
     return confidence.reshape(RS_SYMBOLS, 8).min(axis=1)
 
 
 def erasure_indices(confidence, threshold):
-    """Return byte positions whose normalized confidence is below threshold."""
+    """Return byte positions whose normalized confidence is below threshold.
+
+    Args:
+        confidence (array-like): Array of byte confidence scores.
+        threshold (float): Confidence cutoff in [0.0, 1.0].
+
+    Returns:
+        list[int]: Byte index positions flagged as erasures.
+
+    Raises:
+        ValueError: If threshold is out of bounds or confidence shape is invalid.
+    """
     if not 0.0 <= threshold <= 1.0:
         raise ValueError("erasure threshold must be between 0 and 1")
     scores = np.asarray(confidence, dtype=np.float64).ravel()
@@ -49,29 +87,60 @@ def erasure_indices(confidence, threshold):
 
 
 def decode_with_erasures(coded_bits, positions):
-    """Decode with reedsolo's supported erase_pos byte-position argument."""
+    """Decode with reedsolo's supported erase_pos byte-position argument.
+
+    Args:
+        coded_bits (array-like): Received 64-bit candidate codeword.
+        positions (iterable[int]): Identified byte indices marked as erased.
+
+    Returns:
+        tuple[np.ndarray, bool]: (Decoded message bit sequence, success flag).
+
+    Raises:
+        ValueError: If symbols or erasure positions are malformed.
+    """
     data = ecc.bits_to_bytes(coded_bits)
     if len(data) != RS_SYMBOLS:
         raise ValueError(f"expected {RS_SYMBOLS} Reed-Solomon symbols, got {len(data)}")
     positions = list(positions)
+    # Ensure positions are unique and fall within valid symbol indices [0, 7]
     if len(set(positions)) != len(positions) or any(
         not isinstance(position, (int, np.integer)) or not 0 <= position < RS_SYMBOLS
         for position in positions
     ):
         raise ValueError("erasure positions must be unique byte indices from 0 to 7")
     try:
+        # Decode utilizing known erasure locations to expand correction capacity
         message, _, _ = _rs.decode(data, erase_pos=positions)
         return ecc.bytes_to_bits(message), True
     except ReedSolomonError:
+        # Fall back to uncorrected payload prefix on decoding failure
         return np.asarray(coded_bits[:MESSAGE_BITS], dtype=np.int64), False
 
 
 def _message_success(decoded, decoded_ok, expected):
+    """Validates that decoding succeeded and matches the ground-truth bit sequence."""
     return bool(decoded_ok and np.array_equal(decoded, expected))
 
 
 def analyze_image(image, image_name, attack_cases=ATTACK_CASES, key=KEY, seed=SEED):
-    """Run P8 once and measure normal, confidence, and oracle decoding per threshold."""
+    """Run P8 once and measure normal, confidence, and oracle decoding per threshold.
+
+    Compares standard hard decoding against:
+      1. Confidence-based erasure decoding (flagging low-confidence bytes).
+      2. Oracle erasure decoding (erasing true error locations as a theoretical ceiling).
+
+    Args:
+        image (np.ndarray): Preprocessed 512x512 BGR uint8 image.
+        image_name (str): Identifier name of the image.
+        attack_cases (list): Attack condition pairs to evaluate.
+        key (int): Pseudo-random permutation key.
+        seed (int): Deterministic distortion seed.
+
+    Returns:
+        list[dict]: Evaluation trial records spanning all erasure thresholds.
+    """
+    # Execute image recovery run to obtain extracted bits and per-bit soft-vote totals
     base_rows = run_experiment(
         image,
         image_name,
@@ -88,17 +157,23 @@ def analyze_image(image, image_name, attack_cases=ATTACK_CASES, key=KEY, seed=SE
         vote_totals = base["vote_totals"]
         original_bytes = ecc.bits_to_bytes(coded_bits)
         extracted_bytes = ecc.bits_to_bytes(extracted_bits)
+
+        # Identify ground-truth byte-level errors for oracle baseline calculation
         actual_errors = [
             index for index, (original, extracted) in enumerate(
                 zip(original_bytes, extracted_bytes)
             )
             if original != extracted
         ]
+        # Derive per-bit and per-byte confidence metrics from soft-voting totals
         bit_confidence = normalize_bit_confidence(vote_totals)
         byte_scores = byte_confidence(bit_confidence)
 
+        # Baseline: Standard Reed-Solomon decoding without erasure hints
         normal_message, normal_ok = ecc.decode(extracted_bits)
         normal_success = _message_success(normal_message, normal_ok, expected_message)
+
+        # Evaluate confidence-based erasure decoding across candidate thresholds
         for threshold in ERASURE_THRESHOLDS:
             predicted = erasure_indices(byte_scores, threshold)
             erased_message, erased_ok = decode_with_erasures(extracted_bits, predicted)
@@ -126,6 +201,15 @@ def analyze_image(image, image_name, attack_cases=ATTACK_CASES, key=KEY, seed=SE
 
 
 def write_results(rows, output_csv=OUTPUT_CSV):
+    """Serializes erasure recovery trial records to CSV format.
+
+    Args:
+        rows (list[dict]): Collected erasure decoding trial records.
+        output_csv (Path or str): Output file destination.
+
+    Returns:
+        Path: Output path of the saved CSV.
+    """
     output_csv = Path(output_csv)
     output_csv.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(rows).to_csv(output_csv, index=False)
@@ -133,22 +217,28 @@ def write_results(rows, output_csv=OUTPUT_CSV):
 
 
 def main():
+    """CLI execution entry point for Phase 10 confidence-based erasure evaluation."""
+    # Retrieve clean test image cohort
     images = select_test_images()
     if len(images) != N_IMAGES:
         raise ValueError(f"P10 needs {N_IMAGES} clean test images (the P8/P9 set); found {len(images)}")
 
+    # Execute erasure evaluation across all images and threshold values
     rows = []
     for name, image in images:
         rows.extend(analyze_image(image, name))
     output = write_results(rows)
 
     frame = pd.DataFrame(rows)
+    # Deduplicate baseline trials to compute total non-erased success count
     normal_successes = int(
         frame.drop_duplicates(["image", "attack", "severity"])["normal_ecc_success"].sum()
     )
+    # Deduplicate oracle trials to compute theoretical erasure recovery ceiling
     oracle_successes = int(
         frame.drop_duplicates(["image", "attack", "severity"])["oracle_erasure_success"].sum()
     )
+    # Compute aggregate successes per confidence threshold
     threshold_summary = frame.groupby("threshold")["erasure_ecc_success"].sum()
     best_threshold = float(threshold_summary.idxmax())
 
@@ -161,6 +251,7 @@ def main():
         print(f"    {threshold:.2f}: {int(successes)}")
     print(f"Best confidence threshold: {best_threshold:.2f}")
 
+    # Inspect outcomes on severe and moderate low-pass and cropping attacks
     focus = frame[
         frame["attack"].isin(("blur", "resize", "smooth", "crop"))
         & frame["severity"].isin(("moderate", "severe"))
