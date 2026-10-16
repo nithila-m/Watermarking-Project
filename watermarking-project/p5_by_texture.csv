@@ -1,6 +1,0 @@
-config,Smooth,Medium,Complex
-uniform,0.9588,0.9532,0.9308
-uniform+ecc,0.9604,0.9652,0.9716
-heuristic+ecc,0.9612,0.9624,0.9608
-adaptive,0.9584,0.9524,0.9288
-adaptive+ecc,0.96,0.9656,0.9692

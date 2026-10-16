@@ -1,6 +1,0 @@
-config,light,moderate,severe,all attacks,bit_acc
-uniform,0.9971,0.99,0.8504,0.9476,0.987
-uniform+ecc,1.0,0.9993,0.8938,0.9657,0.9871
-heuristic+ecc,1.0,0.9915,0.8892,0.9615,0.9917
-adaptive,0.9979,0.9889,0.8475,0.9465,0.9865
-adaptive+ecc,1.0,0.9989,0.8917,0.9649,0.9866
