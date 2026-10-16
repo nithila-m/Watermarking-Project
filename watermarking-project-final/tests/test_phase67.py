@@ -1,4 +1,5 @@
-"""Phase 6/7 helpers: map knobs, the settings file, and exact case reproduction."""
+"""Unit tests for Phase 6/7 helper logic: learned-map generation, choice file 
+parameter handling, and exact-case reproduction used by failure analysis."""
 import json
 
 import numpy as np
@@ -9,7 +10,7 @@ from watermark.strength_map import learned_map, normalize
 
 
 class FakeModel:
-    """Stands in for the trained forests: disturbance grows across the image."""
+    # FakeModel simulates the predictor outputs (sigma/keep) deterministically so learned_map behaviour is testable without the trained model.
     def predict_sigma(self, feats):
         return np.linspace(1.0, 20.0, len(feats))
 
@@ -18,11 +19,13 @@ class FakeModel:
 
 
 def test_learned_map_defaults_unchanged(image):
+    # With alpha=1 we expect the learned_map to reflect the predictor outputs and normalization exactly — this verifies no accidental API/normalization changes.
     m = learned_map(image, FakeModel(), alpha=1.0)
     assert np.allclose(m, normalize(np.linspace(1.0, 20.0, 1024)))
 
 
 def test_floor_and_shrink(image):
+    # Floor (s_min) and shrink change the distribution shape but preserve mean normalization; tests check clipping/flooring and reduced variance respectively
     base = learned_map(image, FakeModel())
     floored = learned_map(image, FakeModel(), s_min=0.5)
     shrunk = learned_map(image, FakeModel(), shrink=0.5)
@@ -34,6 +37,7 @@ def test_floor_and_shrink(image):
 
 def test_map_params_defaults_and_overrides(tmp_path):
     p = tmp_path / "choice.json"
+    # choice.map_params reads the choice JSON and applies defaults/overrides; this test ensures overrides and missing keys behave as intended.
     assert choice.map_params(p) == choice.MAP_KEYS
     p.write_text(json.dumps({"alpha": 0.5, "s_min": 0.5, "verdict": "x"}))
     got = choice.map_params(p, alpha=None, beta=1.0)
@@ -42,6 +46,7 @@ def test_map_params_defaults_and_overrides(tmp_path):
 
 def test_reproduce_matches_evaluate(image, monkeypatch):
     """A Phase 6 rebuild must give the same answer Phase 5 recorded."""
+    # Rebuilding a case using failure.reproduce must match the evaluate_image output recorded earlier; monkeypatch ensures dataset.load returns the same image used in evaluate_image.
     monkeypatch.setattr(failure.dataset, "load", lambda split, name: image)
     rows = evaluate_image(image, "astro", {"uniform+ecc": CONFIGS["uniform+ecc"]},
                           attacks=[("smooth", "severe"), ("jpeg", "moderate")])
