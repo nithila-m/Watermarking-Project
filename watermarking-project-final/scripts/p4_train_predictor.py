@@ -34,6 +34,7 @@ from watermark.sampling import sample
 from watermark.stats import compare
 from watermark.strength_map import heuristic_map, learned_map
 
+# Shared output locations let training and decision-only runs use the same artifacts.
 OUT = Path("results")
 MODEL = Path("models/survival.joblib")
 CHOICE = OUT / "p4_choice.json"
@@ -72,6 +73,7 @@ def main():
     args = ap.parse_args()
     OUT.mkdir(exist_ok=True)
 
+    # Use this mode to rerun validation with an existing model, without retraining.
     if args.decision_only:
         if not MODEL.exists():
             raise SystemExit(f"{MODEL} not found: run without --decision-only first.")
@@ -112,6 +114,7 @@ def decide(args):
     """Steps 3-4: compare maps on the val split and write results/p4_choice.json."""
     load_model(MODEL)                     # fail here, clearly, if the file is broken
     names = sample(dataset.require("val"), args.val_n, seed=1)
+    # All candidate maps use the same images so their results can be compared in pairs.
     jobs = [("val", n, ["uniform+ecc", "heuristic+ecc"], VARIANTS, str(MODEL)) for n in names]
     rows, failed = [], []
     for (_, n, *_), r, err in pmap(eval_variants_job, jobs, args.workers, desc="decision (val)"):
@@ -158,6 +161,7 @@ def decide(args):
                    "(results/p4_decision.csv).")
     choice = {"variant": best_v, **VARIANTS[best_v], "verdict": verdict,
               "val_images": n_ok, "val_success": summary.success.round(4).to_dict()}
+    # Downstream Phase 5 scripts read this file as the single source for alpha and beta.
     CHOICE.write_text(json.dumps(choice, indent=1))
     print(f"\nDECISION: {verdict}\nalpha={choice['alpha']} beta={choice['beta']} saved to {CHOICE}")
 
