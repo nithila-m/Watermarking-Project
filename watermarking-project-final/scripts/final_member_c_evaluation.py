@@ -16,17 +16,21 @@ from watermark.config import (
     PAYLOAD_BITS,
 )
 
+# Output directory and canonical report artifact destinations
 RESULTS = Path("results")
 FINAL_CSV = RESULTS / "final_member_c_results.csv"
 SUMMARY_CSV = RESULTS / "final_member_c_summary.csv"
 TABLES_MD = RESULTS / "final_member_c_tables.md"
 FINDINGS_MD = RESULTS / "final_member_c_findings.md"
+
 # Member C's report text was written for the scikit-image sample set, whose first
 # three clean test images are these. On another dataset (e.g. COCO) the scripts use
 # the first three clean test images instead and recompute every number.
 SAMPLE_IMAGES = ("grass", "gravel", "hubble_deep_field")
+# Evaluation sweep thresholds for Phase 10 confidence-based erasure decoding
 P10_THRESHOLDS = (0.0, 0.25, 0.50, 0.75, 1.0)
 
+# Standardized column structure for the consolidated evaluation log
 FINAL_COLUMNS = (
     "experiment", "image", "attack", "severity", "method/configuration",
     "bit_accuracy", "BER", "PSNR", "SSIM", "RS_byte_errors",
@@ -35,16 +39,38 @@ FINAL_COLUMNS = (
 
 
 def _image_names():
-    """The clean test images P8-P11 run on (the first three sorted clean test images)."""
+    """The clean test images P8-P11 run on (the first three sorted clean test images).
+
+    Returns:
+        list[str]: Basenames of the three evaluation images.
+    """
     return [name for name, _ in select_test_images()]
 
 
 def _is_sample_run(p9):
+    """Checks whether the evaluated cohort matches the baseline scikit-image sample set.
+
+    Args:
+        p9 (pd.DataFrame): DataFrame containing Phase 9 experiment records.
+
+    Returns:
+        bool: True if test images match SAMPLE_IMAGES, False otherwise.
+    """
     return tuple(dict.fromkeys(p9.image)) == SAMPLE_IMAGES
 
 
 def _key_counts(p9, p10, p11):
-    """Every count the written conclusions quote, computed from the CSVs."""
+    """Every count the written conclusions quote, computed from the CSVs.
+
+    Args:
+        p9 (pd.DataFrame): Phase 9 symbol analysis records.
+        p10 (pd.DataFrame): Phase 10 confidence erasure records.
+        p11 (pd.DataFrame): Phase 11 voting comparison records.
+
+    Returns:
+        dict[str, int]: Aggregate counts for exact decoding, RS capacity bounds,
+                        and voting recovery statistics.
+    """
     within = p9[p9.within_rs_symbol_capacity]
     beyond = p9[~p9.within_rs_symbol_capacity]
     base = p10[p10.threshold == min(P10_THRESHOLDS)].drop_duplicates(["image", "attack", "severity"])
@@ -66,7 +92,25 @@ def _key_counts(p9, p10, p11):
 def make_record(experiment, image="", attack="", severity="", method="",
                 bit_accuracy=None, ber=None, psnr=None, ssim=None,
                 rs_byte_errors=None, ecc_success=None, exact_recovery=None):
-    """Create a consistent row, retaining unavailable measurements as blanks."""
+    """Create a consistent row, retaining unavailable measurements as blanks.
+
+    Args:
+        experiment (str): Name or phase identifier of the experimental run.
+        image (str): Name or path of the test image.
+        attack (str): Applied distortion type.
+        severity (str): Intensity tier of the applied distortion.
+        method (str): Evaluated pipeline, voting, or decoding configuration.
+        bit_accuracy (float, optional): Measured bit accuracy [0.0, 1.0].
+        ber (float, optional): Measured bit error rate [0.0, 1.0].
+        psnr (float, optional): Visual fidelity in decibels.
+        ssim (float, optional): Structural similarity index [-1.0, 1.0].
+        rs_byte_errors (int, optional): Count of corrupted Reed-Solomon symbol bytes.
+        ecc_success (bool, optional): Whether ECC decoding succeeded.
+        exact_recovery (bool, optional): Whether the final recovered payload matches ground truth.
+
+    Returns:
+        dict: Standardized record mapping to FINAL_COLUMNS schema.
+    """
     return {
         "experiment": experiment,
         "image": image,
@@ -84,6 +128,17 @@ def make_record(experiment, image="", attack="", severity="", method="",
 
 
 def _read(name):
+    """Reads an evaluation CSV from the results folder, preserving string IDs.
+
+    Args:
+        name (str): CSV filename within the results directory.
+
+    Returns:
+        pd.DataFrame: Loaded DataFrame.
+
+    Raises:
+        FileNotFoundError: If the requested CSV does not exist.
+    """
     path = RESULTS / name
     if not path.is_file():
         raise FileNotFoundError(f"Required existing evaluation result is missing: {path}")
@@ -91,12 +146,28 @@ def _read(name):
 
 
 def _boolean(value):
+    """Converts truthy/falsy values to standard Python booleans, preserving NaNs.
+
+    Args:
+        value: Scalar value to convert.
+
+    Returns:
+        bool or None: Converted boolean or None if NaN.
+    """
     if pd.isna(value):
         return None
     return bool(value)
 
 
 def _p2_rows(frame):
+    """Extracts and normalizes Phase 2 baseline end-to-end evaluation records.
+
+    Args:
+        frame (pd.DataFrame): Raw Phase 2 results DataFrame.
+
+    Returns:
+        list[dict]: Normalized evaluation records.
+    """
     rows = []
     for source in frame.to_dict("records"):
         has_ecc = source["config"] == "uniform+ecc"
@@ -117,6 +188,14 @@ def _p2_rows(frame):
 
 
 def _p7_rows(source_rows=None):
+    """Extracts and normalizes Phase 7 partial recovery synthetic records.
+
+    Args:
+        source_rows (list[dict], optional): Output of run_p7_experiment.
+
+    Returns:
+        list[dict]: Normalized evaluation records.
+    """
     rows = []
     source_rows = source_rows if source_rows is not None else run_p7_experiment(seed=2026)
     for source in source_rows:
@@ -135,11 +214,22 @@ def _p7_rows(source_rows=None):
 
 
 def _p8_p9_rows(p8, p9):
+    """Combines Phase 8 pipeline trials with Phase 9 symbol-error statistics.
+
+    Args:
+        p8 (pd.DataFrame): Phase 8 real-image pipeline results.
+        p9 (pd.DataFrame): Phase 9 Reed-Solomon symbol error records.
+
+    Returns:
+        list[dict]: Normalized evaluation records.
+    """
+    # Map (image, attack, severity) tuples to observed byte error counts
     symbol_counts = {
         (row["image"], row["attack"], row["severity"]): row["erroneous_symbol_count"]
         for row in p9.to_dict("records")
     }
     rows = []
+    # Ingest Phase 8 pipeline trials
     for source in p8.to_dict("records"):
         rows.append(make_record(
             "P8 real-image pipeline",
@@ -156,6 +246,7 @@ def _p8_p9_rows(p8, p9):
             ecc_success=_boolean(source["ecc_decode_ok"]),
             exact_recovery=_boolean(source["exact_message_recovered"]),
         ))
+    # Ingest Phase 9 symbol error analysis trials
     for source in p9.to_dict("records"):
         rows.append(make_record(
             "P9 RS symbol analysis",
@@ -174,6 +265,14 @@ def _p8_p9_rows(p8, p9):
 
 
 def _p10_rows(frame):
+    """Extracts and normalizes Phase 10 confidence-based erasure evaluation records.
+
+    Args:
+        frame (pd.DataFrame): Phase 10 erasure experiment DataFrame.
+
+    Returns:
+        list[dict]: Normalized evaluation records including baseline and oracle comparisons.
+    """
     rows = []
     for source in frame.to_dict("records"):
         common = {
@@ -184,6 +283,7 @@ def _p10_rows(frame):
             "ber": 1.0 - source["bit_accuracy"],
             "rs_byte_errors": source["actual_erroneous_rs_bytes"],
         }
+        # Record confidence-thresholded erasure decoding run
         rows.append(make_record(
             "P10 confidence erasure analysis",
             method=f"confidence erasure threshold={source['threshold']:.2f}",
@@ -191,6 +291,7 @@ def _p10_rows(frame):
             exact_recovery=_boolean(source["erasure_ecc_success"]),
             **common,
         ))
+        # Record baseline and oracle runs at the minimum threshold boundary
         if source["threshold"] == P10_THRESHOLDS[0]:
             rows.append(make_record(
                 "P10 confidence erasure analysis",
@@ -210,6 +311,14 @@ def _p10_rows(frame):
 
 
 def _p11_rows(frame):
+    """Extracts and normalizes Phase 11 voting-rule comparison records.
+
+    Args:
+        frame (pd.DataFrame): Phase 11 robust voting DataFrame.
+
+    Returns:
+        list[dict]: Normalized evaluation records.
+    """
     return [
         make_record(
             "P11 robust voting",
@@ -228,8 +337,14 @@ def _p11_rows(frame):
 
 
 def _demo_rows():
+    """Executes a two-condition verification demo on the primary test image.
+
+    Returns:
+        list[dict]: Evaluation results under unattacked and moderate blur conditions.
+    """
     name, image = select_test_images()[0]          # the same first clean image P8 uses
     rows = []
+    # Run unattacked baseline and moderate blur stress test
     for attack, severity in (("none", "none"), ("blur", "moderate")):
         result = run_demo(image, "TEST", attack, severity, key=2024, seed=2026)
         rows.append({"image": name, **result})
@@ -237,16 +352,40 @@ def _demo_rows():
 
 
 def _success_rate(series):
+    """Formats series successes as an explicit ratio string (e.g. '15/20').
+
+    Args:
+        series (pd.Series): Boolean or numeric series indicating recovery success.
+
+    Returns:
+        str: Formatted count ratio string.
+    """
     return f"{int(series.sum())}/{len(series)}"
 
 
 def p2_ecc_recovery(frame):
-    """Return exact uniform+ECC recoveries and the number of evaluated rows."""
+    """Return exact uniform+ECC recoveries and the number of evaluated rows.
+
+    Args:
+        frame (pd.DataFrame): Phase 2 baseline results.
+
+    Returns:
+        tuple[int, int]: (Total successful recoveries, total evaluated rows).
+    """
     ecc_rows = frame[frame.config == "uniform+ecc"]
     return int(ecc_rows.success.sum()), len(ecc_rows)
 
 
 def _table(headers, rows):
+    """Renders a standard Markdown table from header labels and tabular rows.
+
+    Args:
+        headers (iterable[str]): Column title strings.
+        rows (iterable[iterable]): Row data values.
+
+    Returns:
+        str: Formatted Markdown table text.
+    """
     output = [
         "| " + " | ".join(headers) + " |",
         "| " + " | ".join("---" for _ in headers) + " |",
@@ -256,8 +395,18 @@ def _table(headers, rows):
 
 
 def build_tables(p2, p8, p9, p10, p11, demo):
+    """Assembles all report-ready Markdown tables across Member C evaluations.
+
+    Args:
+        p2, p8, p9, p10, p11, demo: Experimental result DataFrames.
+
+    Returns:
+        str: Complete Markdown document containing Tables 1 through 6.
+    """
     k = _key_counts(p9, p10, p11)
     n, n2 = k["cases"], p2.image.nunique()
+
+    # Table 1: Clean image performance
     clean = p2[(p2.config == "uniform+ecc") & (p2.attack == "none")]
     clean_row = [
         f"P2 uniform+ECC ({n2} images)",
@@ -272,6 +421,7 @@ def build_tables(p2, p8, p9, p10, p11, demo):
         f"P12 {dclean.image} demo: {dclean.bit_accuracy:.2%}, exact={str(bool(dclean.exact_recovery)).upper()}"
     )
 
+    # Table 2: Attack robustness across distortion families
     attacks = p2[
         (p2.config == "uniform+ecc")
         & p2.attack.isin(("jpeg", "blur", "resize", "crop", "smooth"))
@@ -283,6 +433,7 @@ def build_tables(p2, p8, p9, p10, p11, demo):
             f"{group.ber.mean():.4f}", _success_rate(group.success),
         ))
 
+    # Table 3: Reed-Solomon byte error breakdown
     symbol_rows = []
     focus_p9 = p9[
         p9.attack.isin(("blur", "resize", "smooth", "crop"))
@@ -298,6 +449,7 @@ def build_tables(p2, p8, p9, p10, p11, demo):
             f"{within}/{len(group)} within ≤2-symbol correction bound",
         ))
 
+    # Table 4: Confidence-based erasure decoding sweep
     p10_unique = p10.drop_duplicates(["image", "attack", "severity", "threshold"])
     threshold_rows = []
     for threshold, group in p10_unique.groupby("threshold", sort=True):
@@ -312,6 +464,7 @@ def build_tables(p2, p8, p9, p10, p11, demo):
     normal_count = int(base_p10.normal_ecc_success.sum())
     oracle_count = int(base_p10.oracle_erasure_success.sum())
 
+    # Table 5: Voting rule comparisons
     voting_rows = []
     for method, group in p11.groupby("voting_method", sort=False):
         voting_rows.append((
@@ -320,6 +473,7 @@ def build_tables(p2, p8, p9, p10, p11, demo):
             _success_rate(group.exact_text_recovery),
         ))
 
+    # Table 6: Interactive demo verification trials
     demo_rows = []
     for source in demo.to_dict("records"):
         demo_rows.append((
@@ -352,8 +506,18 @@ def build_tables(p2, p8, p9, p10, p11, demo):
 
 
 def build_summary(p2, p7, p8, p9, p10, p11, demo):
+    """Constructs a consolidated DataFrame summarizing high-level findings across phases.
+
+    Args:
+        p2, p7, p8, p9, p10, p11, demo: Experimental result DataFrames.
+
+    Returns:
+        pd.DataFrame: Tabular summary of experimental metrics and conclusions.
+    """
     rows = []
     n, n2, sample = len(p9), p2.image.nunique(), _is_sample_run(p9)
+
+    # Section A: Baseline and end-to-end performance
     clean = p2[(p2.config == "uniform+ecc") & (p2.attack == "none")]
     p2_recovered, p2_cases = p2_ecc_recovery(p2)
     rows.extend([
@@ -381,6 +545,8 @@ def build_summary(p2, p7, p8, p9, p10, p11, demo):
          "value": f"{p2_smooth_severe.bit_acc.mean():.2%} / {int(p2_smooth_severe.success.sum())}/{len(p2_smooth_severe)}",
          "notes": f"{n2}-image P2 uniform+ECC result" + ("; severe smoothing was the major weakness." if sample else ".")},
     ])
+
+    # Section B: Partial recovery under synthetic observation corruption
     for source in p7.to_dict("records"):
         rows.append({
             "section": "B. Partial recovery",
@@ -390,6 +556,7 @@ def build_summary(p2, p7, p8, p9, p10, p11, demo):
             "notes": "Deterministic P7 synthetic-margin test; not an image attack.",
         })
 
+    # Section C: Reed-Solomon symbol-level error capacity
     within = p9[p9.within_rs_symbol_capacity]
     beyond = p9[~p9.within_rs_symbol_capacity]
     rows.append({
@@ -407,6 +574,7 @@ def build_summary(p2, p7, p8, p9, p10, p11, demo):
         "notes": "Derived from existing configuration and block-grid dimensions.",
     })
 
+    # Section D: Confidence erasure decoding analysis
     p10_unique = p10.drop_duplicates(["image", "attack", "severity", "threshold"])
     threshold_counts = p10_unique.groupby("threshold").erasure_ecc_success.sum()
     best = int(threshold_counts.max())
@@ -426,6 +594,7 @@ def build_summary(p2, p7, p8, p9, p10, p11, demo):
          "notes": "Analysis-only, using known erroneous RS byte positions; not part of production."},
     ])
 
+    # Section E: Voting method comparisons
     vote_summary = p11.groupby("voting_method", sort=False).agg(
         accuracy=("coded_bit_accuracy", "mean"),
         exact=("exact_text_recovery", "sum"),
@@ -449,6 +618,7 @@ def build_summary(p2, p7, p8, p9, p10, p11, demo):
             "notes": f"P11 {n}-case voting comparison.",
         })
 
+    # Section F: Interactive demo verification
     for source in demo.to_dict("records"):
         rows.append({
             "section": "F. Final demo verification",
@@ -461,6 +631,15 @@ def build_summary(p2, p7, p8, p9, p10, p11, demo):
 
 
 def build_findings(summary, p9, p10, p11):
+    """Builds narrative findings and failure analyses in Markdown format.
+
+    Args:
+        summary (pd.DataFrame): Consolidated experimental summary DataFrame.
+        p9, p10, p11 (pd.DataFrame): Experimental trial DataFrames.
+
+    Returns:
+        str: Comprehensive narrative evaluation report.
+    """
     summary_text = "\n".join(
         f"- **{row.finding}:** {row.value}. {row.notes}"
         for row in summary.itertuples(index=False)
@@ -534,13 +713,23 @@ The final package consolidates the measured Member C evidence while retaining th
 
 
 def build_package():
+    """Runs data consolidation across all Member C experiment phases and writes reports.
+
+    Returns:
+        tuple[pd.DataFrame, pd.DataFrame]: (consolidated_records_df, summary_findings_df).
+
+    Raises:
+        ValueError: If experimental row counts or test image alignments deviate from expected values.
+    """
     RESULTS.mkdir(exist_ok=True)
+    # Load raw result tables from prior experimental phases
     p2 = _read("p2_baseline.csv")
     p8 = _read("p8_image_recovery.csv")
     p9 = _read("p9_symbol_error_analysis.csv")
     p10 = _read("p10_erasure_recovery.csv")
     p11 = _read("p11_robust_voting.csv")
 
+    # Verify that experimental tables were computed on matching test cohorts
     names = _image_names()
     for label, frame in (("P8", p8), ("P9", p9), ("P10", p10), ("P11", p11)):
         found = list(dict.fromkeys(frame.image))
@@ -548,13 +737,16 @@ def build_package():
         if found != expected:
             raise ValueError(f"{label} results were made on {found}, but the current clean test images are "
                              f"{expected}. Re-run P8-P11 on this dataset first.")
+    # Check expected completed row counts
     if len(p8) != 19 or len(p9) != 57 or len(p10) != 285 or len(p11) != 285:
         raise ValueError("P8-P11 result CSV row counts differ from the completed experiment set.")
 
+    # Execute deterministic synthetic tests and demo trials
     p7_results = run_p7_experiment(seed=2026)
     p7_result = pd.DataFrame(p7_results)
     demo_results = pd.DataFrame(_demo_rows())
 
+    # Build consolidated row hierarchy
     rows = (
         _p2_rows(p2)
         + _p7_rows(p7_results)
@@ -580,6 +772,8 @@ def build_package():
     )
     final = pd.DataFrame(rows, columns=FINAL_COLUMNS)
     summary = build_summary(p2, p7_result, p8, p9, p10, p11, demo_results)
+
+    # Persist all consolidated CSVs and Markdown narrative reports
     final.to_csv(FINAL_CSV, index=False)
     summary.to_csv(SUMMARY_CSV, index=False)
     TABLES_MD.write_text(
@@ -594,6 +788,7 @@ def build_package():
 
 
 def main():
+    """CLI execution entry point for generating the Member C evaluation artifacts."""
     final, summary = build_package()
     print(f"Final detailed rows: {len(final)} -> {FINAL_CSV}")
     print(f"Summary findings: {len(summary)} -> {SUMMARY_CSV}")
