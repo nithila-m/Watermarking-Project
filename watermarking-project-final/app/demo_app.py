@@ -1,4 +1,7 @@
-"""Final user-facing Member C demo.
+"""Streamlit interface for the final user-facing watermarking demo.
+
+Lets users upload or select a test image, run the embed/attack/recovery
+pipeline, and inspect the resulting images and quality metrics.
 
 Launch with: streamlit run app/demo_app.py
 """
@@ -31,6 +34,7 @@ with st.sidebar:
     uploaded = st.file_uploader(
         "Upload an image", type=["png", "jpg", "jpeg", "bmp", "webp"]
     )
+    # Keep the sample list focused on full test images, not their cropped variants.
     sample_names = [
         name for name in dataset.split_names("test")
         if not re.search(r"_c\d+$", name)
@@ -61,9 +65,11 @@ if run_button:
         else:
             raise ValueError("Upload an image or choose a test image.")
 
+        # Run the complete embed → attack → extract workflow for the selected inputs.
         result = run_demo(image, watermark_text, attack_kind, severity)
         st.subheader("Images")
         original_col, watermarked_col, attacked_col = st.columns(3)
+        # The pipeline returns OpenCV BGR images, so tell Streamlit how to interpret channels.
         original_col.image(result["original_image"], channels="BGR", caption="Original image")
         watermarked_col.image(
             result["watermarked_image"], channels="BGR", caption="Watermarked image"

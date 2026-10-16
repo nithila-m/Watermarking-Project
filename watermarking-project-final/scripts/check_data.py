@@ -1,8 +1,11 @@
-r"""Step 0: check B's dataset (and any real AI edits) before spending hours on it.
+r"""Preflight check for the watermarking dataset and optional AI-edited images.
 
     python scripts\check_data.py
     python scripts\check_data.py --external data\external      # also check Colab edits
     python scripts\check_data.py --no-timing                    # skip the speed test
+
+Run this before the expensive pipeline phases to catch missing, mismatched, or
+incorrectly sized inputs and estimate the expected processing time.
 
 Checks
   * data/clean/{train,val,test} exist and every PNG is 512x512 RGB
@@ -31,6 +34,7 @@ def check_split(split):
     names = dataset.split_names(split)
     bad = []
     for n in names:
+        # Read image metadata only; decoding pixel data is unnecessary for size/mode checks.
         with Image.open(dataset.image_path(split, n)) as im:      # header only, fast
             if im.size != (IMG_SIZE, IMG_SIZE) or im.mode not in ("RGB", "L"):
                 bad.append(f"{n}: {im.size} {im.mode}")
@@ -47,6 +51,7 @@ def check_external(root, train_names, test_names):
     rows = []
     for e in edits:
         d = Path(root) / e
+        # Accept both flat exports and the newer train/ and test/<config>/ layouts.
         flat = {p.stem for p in d.glob("*.png")}
         tr = {p.stem for p in (d / "train").glob("*.png")}
         te = {(p.parent.name, p.stem) for p in (d / "test").glob("*/*.png")}
@@ -101,6 +106,7 @@ def main():
 
     if TEXTURE_CSV.exists():
         tex = pd.read_csv(TEXTURE_CSV)
+        # Ensure texture annotations correspond one-to-one with the test image names.
         listed = set(tex.filename.str.replace(r"\.png$", "", regex=True))
         missing, extra = set(names["test"]) - listed, listed - set(names["test"])
         print(f"[texture] {len(listed)} rows; categories "
@@ -121,6 +127,7 @@ def main():
         n3 = min(RECOMMENDED["p3_train"], len(names["train"]))
         n4 = min(RECOMMENDED["p4_val"], len(names["val"]))
         n5 = min(RECOMMENDED["p5_test"], len(names["test"]))
+        # Discount ideal parallel scaling to avoid overly optimistic runtime estimates.
         speed = max(1.0, w * 0.75)          # parallel speed-up is never perfect
         print(f"\n[timing] one image: Phase 3 {t3:.1f} s, Phase 5 {t5:.1f} s (5 configs). "
               f"{w} worker processes.")

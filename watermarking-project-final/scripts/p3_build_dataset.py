@@ -49,6 +49,7 @@ def main():
     if args.external and not with_ext:
         print(f"! no edited training images found in {args.external} (check names/layout with "
               f"scripts\\check_data.py --external {args.external})")
+    # Include every image with real edits first, then fill the remaining sample from other images.
     rest = sample(sorted(set(all_names) - with_ext), max(0, args.limit - len(with_ext)), args.seed) \
         if args.limit else sorted(set(all_names) - with_ext)
     names = sorted(with_ext) + rest
@@ -56,6 +57,7 @@ def main():
 
     frames, failed = [], []
     jobs = [(n, args.external, args.ext_weight) for n in names]
+    # Process images in parallel, keeping successful tables and reporting individual failures.
     for (n, _, _), df, err in pmap(survival_job, jobs, args.workers, desc="survival"):
         if err:
             failed.append(n)
@@ -65,6 +67,7 @@ def main():
     df = pd.concat(frames, ignore_index=True)
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
+    # Create the output directory as needed, then save the per-block training table.
     df.to_csv(out, index=False)
 
     print(f"\n{len(df)} block rows from {df.image_id.nunique()} images -> {out}"
@@ -75,6 +78,7 @@ def main():
     if len(ext):
         print(f"\nReal vs synthetic attacks on the {ext.image_id.nunique()} images that have both "
               f"(Spearman correlation per block; ~1 = synthetic attacks are a good stand-in):")
+        # Compare matching per-block synthetic and real targets to gauge their agreement.
         for syn, real in (("log_sigma_syn", "log_sigma_ext"), ("keep_syn", "keep_ext")):
             part = ext[[syn, real]].dropna()
             if len(part):

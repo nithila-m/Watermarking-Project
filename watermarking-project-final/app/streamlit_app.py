@@ -1,8 +1,10 @@
-"""Interactive test bench (the public demo is built separately).
+"""Interactive Streamlit test bench for experimenting with watermark robustness.
 
-    streamlit run app/streamlit_app.py
+Users can upload or select an image, choose a watermark and embedding strategy,
+apply an attack, and inspect recovery and image-quality diagnostics. The public
+demo is built separately.
 
-Upload or pick an image -> choose strength map -> embed -> apply an edit -> verify.
+Launch with: streamlit run app/streamlit_app.py
 """
 from pathlib import Path
 
@@ -31,10 +33,12 @@ st.title("Adaptive watermark test bench")
 
 @st.cache_resource
 def get_model():
+    # Load the optional learned-map model once and reuse it across Streamlit reruns.
     return load_model(MODEL_PATH) if MODEL_PATH.exists() else None
 
 
 def to_rgb(img):
+    # OpenCV reads color images as BGR, while Matplotlib expects RGB.
     return img[..., ::-1] if img.ndim == 3 else img
 
 
@@ -78,6 +82,7 @@ elif pick:
 else:
     st.info("Upload an image or run scripts/prepare_dataset.py first.")
     st.stop()
+# Match uploaded and dataset images to the pipeline's fixed square input size.
 img = prepare(img)
 
 # ---------------- embed ----------------
@@ -85,12 +90,14 @@ msg_bits = ecc.text_to_bits(message)
 payload = ecc.encode(msg_bits)
 kw = {"alpha": alpha} if mode != "uniform" else {}
 base = make_map(img, mode, model, **kw)
+# Adjust embedding strength to meet the selected visual-quality target.
 wm, s_map, p = embed_at_psnr(img, payload, base, int(key), target)
 _, skipped = embed(img, payload, s_map, int(key), return_skipped=True)
 
 # ---------------- attack + verify ----------------
 att = wm if kind == "none" else apply_attack(wm, kind, sev, int(seed))
 got = extract(att, PAYLOAD_BITS, int(key))
+# ECC decodes the extracted payload and verifies it against the original watermark.
 dec, ok = ecc.decode(got)
 recovered = ecc.bits_to_text(dec)
 verified = ok and np.array_equal(dec, msg_bits)
