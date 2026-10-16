@@ -17,6 +17,7 @@ from scripts.p9_symbol_error_analysis import N_IMAGES, select_test_images
 from watermark import ecc
 from watermark.config import PAYLOAD_BITS
 
+# Candidate block aggregation methods evaluated against the production baseline
 METHODS = (
     "current_soft",
     "median_margin",
@@ -34,9 +35,22 @@ def aggregate_votes(margins, assignment, n_bits=PAYLOAD_BITS):
     Confidence-weighted sign uses sum(sign(margin) * abs(margin)); ties decode 0.
     The current soft baseline preserves extract()'s median-scale tanh formula and
     strict-positive bit decision exactly.
+
+    Args:
+        margins (array-like): Raw DCT coefficient difference margins per block.
+        assignment (array-like): Bit index assigned to each corresponding block.
+        n_bits (int): Total expected codeword bits. Defaults to PAYLOAD_BITS.
+
+    Returns:
+        dict[str, np.ndarray]: Binary bit predictions (0 or 1) for each aggregation rule.
+
+    Raises:
+        ValueError: If array lengths mismatch, assignment indices are out of range,
+                    or any bit lacks corresponding block observations.
     """
     margins = np.asarray(margins, dtype=np.float64).ravel()
     assignment = np.asarray(assignment, dtype=np.int64).ravel()
+    # Ensure inputs conform to spatial layout requirements
     if len(margins) != len(assignment):
         raise ValueError("margins and assignment must have equal lengths")
     if np.any(assignment < 0) or np.any(assignment >= n_bits):
@@ -45,24 +59,34 @@ def aggregate_votes(margins, assignment, n_bits=PAYLOAD_BITS):
     if any(len(group) == 0 for group in groups):
         raise ValueError("every coded bit must have at least one block observation")
 
+    # Method 1: Production soft vote with median absolute scaling and tanh bounding
     scale = np.median(np.abs(margins)) + 1e-9
     current_votes = np.tanh(margins / scale)
     current_totals = np.bincount(
         assignment, weights=current_votes, minlength=n_bits
     )
+
+    # Method 2: Median margin across redundant observations
     median_values = np.array([np.median(group) for group in groups])
     trimmed_values = []
     sign_totals = []
     weighted_sign_totals = []
+
+    # Compute statistical aggregates across each bit's group of redundant blocks
     for group in groups:
+        # Method 3: Trimmed mean (drops highest and lowest outlier margins)
         if len(group) >= 3:
             ordered = np.sort(group)
             trimmed = ordered[1:-1]
         else:
             trimmed = group
         trimmed_values.append(float(np.mean(trimmed)))
+
+        # Method 4: Unweighted sign majority voting
         signs = np.sign(group)
         sign_totals.append(float(np.sum(signs)))
+
+        # Method 5: Confidence-weighted sign voting
         weighted_sign_totals.append(float(np.sum(signs * np.abs(group))))
 
     return {
@@ -77,11 +101,25 @@ def aggregate_votes(margins, assignment, n_bits=PAYLOAD_BITS):
 
 
 def evaluate_observation(image_name, attack, severity, original_bits, margins, assignment):
-    """Score every vote aggregation using the same original block margins."""
+    """Score every vote aggregation using the same original block margins.
+
+    Args:
+        image_name (str): Identifier name of the source test image.
+        attack (str): Applied distortion type.
+        severity (str): Intensity level of the applied attack.
+        original_bits (array-like): Ground truth 64-bit embedded codeword.
+        margins (array-like): Extracted block-level DCT coefficient margins.
+        assignment (array-like): Keyed block-to-bit mapping permutation.
+
+    Returns:
+        list[dict]: Performance and error metrics for all evaluated voting rules.
+    """
     original_bits = np.asarray(original_bits, dtype=np.int64)
     methods = aggregate_votes(margins, assignment, len(original_bits))
     rows = []
     original_bytes = ecc.bits_to_bytes(original_bits)
+
+    # Decode and evaluate recovery fidelity across each voting aggregation rule
     for method in METHODS:
         bits = methods[method]
         decoded, ecc_ok = ecc.decode(bits)
@@ -105,7 +143,17 @@ def evaluate_observation(image_name, attack, severity, original_bits, margins, a
 
 
 def run_experiment(images, attack_cases=ATTACK_CASES, key=KEY, seed=SEED):
-    """Run P8 once per image; compare methods on each case's shared margins."""
+    """Run P8 once per image; compare methods on each case's shared margins.
+
+    Args:
+        images (list[tuple[str, np.ndarray]]): Pairs of (image_name, image_array).
+        attack_cases (list): Attack conditions to test.
+        key (int): Watermark permutation key.
+        seed (int): Deterministic distortion seed.
+
+    Returns:
+        list[dict]: Compiled trial results across all images, attacks, and voting rules.
+    """
     rows = []
     for image_name, image in images:
         cases = run_experiment_for_image(image, image_name, attack_cases, key, seed)
@@ -122,7 +170,18 @@ def run_experiment(images, attack_cases=ATTACK_CASES, key=KEY, seed=SEED):
 
 
 def run_experiment_for_image(image, image_name, attack_cases, key, seed):
-    """Obtain one P8 embed/attack run and retain observations for all methods."""
+    """Obtain one P8 embed/attack run and retain observations for all methods.
+
+    Args:
+        image (np.ndarray): Preprocessed 512x512 BGR uint8 image.
+        image_name (str): Identifier name of the image.
+        attack_cases (list): Attack condition pairs.
+        key (int): Permutation key.
+        seed (int): Attack distortion seed.
+
+    Returns:
+        list[dict]: P8 experimental observations including raw margins and assignments.
+    """
     return run_p8_experiment(
         image, image_name, attack_cases=attack_cases, key=key, seed=seed,
         include_bits=True, include_observations=True,
@@ -130,6 +189,15 @@ def run_experiment_for_image(image, image_name, attack_cases, key, seed):
 
 
 def write_results(rows, output_csv=OUTPUT_CSV):
+    """Saves evaluated voting comparison records to a CSV file.
+
+    Args:
+        rows (list[dict]): Collected voting trial records.
+        output_csv (Path or str): Filepath for output CSV.
+
+    Returns:
+        Path: Output path of the saved CSV.
+    """
     output_csv = Path(output_csv)
     output_csv.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(rows).to_csv(output_csv, index=False)
@@ -137,6 +205,14 @@ def write_results(rows, output_csv=OUTPUT_CSV):
 
 
 def summarize(rows):
+    """Computes aggregate performance metrics grouped by voting method.
+
+    Args:
+        rows (list[dict]): Granular trial records.
+
+    Returns:
+        pd.DataFrame: Grouped summary with mean accuracies and success totals.
+    """
     frame = pd.DataFrame(rows)
     return frame.groupby("voting_method", sort=False).agg(
         cases=("image", "count"),
@@ -148,19 +224,24 @@ def summarize(rows):
 
 
 def main():
+    """Main execution function for evaluating robust voting rules across test images."""
     images = select_test_images()
     expected_images = [name for name, _ in images]          # the same three images P9/P10 use
     if len(images) != N_IMAGES:
         raise ValueError(f"P11 needs {N_IMAGES} clean test images (the P8/P9 set); found {len(images)}")
 
+    # Execute voting comparison on the standardized test image cohort
     rows = run_experiment(images)
     output = write_results(rows)
     summary = summarize(rows)
+
+    # Print high-level benchmark comparison
     print(f"Images: {', '.join(expected_images)} | key={KEY} | seed={SEED}")
     print(summary.to_string(index=False, formatters={
         "mean_bit_accuracy": "{:.2%}".format,
     }))
 
+    # Filter to challenging low-pass and spatial crop distortions for targeted inspection
     focus = pd.DataFrame(rows)
     focus = focus[
         focus["attack"].isin(("blur", "resize", "smooth", "crop"))
@@ -173,6 +254,7 @@ def main():
         ecc_success=("ecc_success", "sum"),
         exact_text=("exact_text_recovery", "sum"),
     ).reset_index()
+
     print("\nSelected robustness cases:")
     print(focus_summary.to_string(index=False, formatters={
         "mean_accuracy": "{:.2%}".format,
